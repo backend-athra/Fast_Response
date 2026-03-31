@@ -26,7 +26,6 @@ if (!fs.existsSync(invoicesFolder)) {
 
 exports.completeWorkAndGenerateBill = async (req, res) => {
   try {
-
     const { workId, paymentMethod = "upi", upiId, upiApp } = req.body;
     const technicianId = req.user._id;
 
@@ -63,15 +62,12 @@ exports.completeWorkAndGenerateBill = async (req, res) => {
     // ================================
 
     if (afterPhotos.length > 0) {
-
       const uploadPromises = afterPhotos.map(photo =>
         uploadToCloudinary(photo.path, "after_photos")
       );
 
       const uploaded = await Promise.all(uploadPromises);
-
       photoUrls = uploaded.map(file => file.secure_url);
-
     }
 
     // ================================
@@ -79,19 +75,20 @@ exports.completeWorkAndGenerateBill = async (req, res) => {
     // ================================
 
     if (afterVideo) {
-
       const uploadRes = await uploadToCloudinary(
         afterVideo.path,
         "after_videos"
       );
 
       videoUrl = uploadRes.secure_url;
-
     }
 
-    // SAVE FILES
-    work.afterphotos = photoUrls;
-    work.aftervideo = videoUrl;
+    // ================================
+    // SAVE FILES  ✅ IMPORTANT FIX
+    // ================================
+    // Schema fields: afterphoto / aftervideo
+    work.afterphoto = photoUrls || [];
+    work.aftervideo = videoUrl || "";
 
     // ================================
     // BILL CALCULATION
@@ -104,9 +101,7 @@ exports.completeWorkAndGenerateBill = async (req, res) => {
     let qrBuffer = null;
 
     if (paymentMethod === "upi") {
-
       const finalUpi = upiId || process.env.UPI_ID;
-
       const name = encodeURIComponent(process.env.COMPANY_NAME || "FAST RESPONSE");
 
       upiUri =
@@ -117,7 +112,6 @@ exports.completeWorkAndGenerateBill = async (req, res) => {
 
       const qr = await QRCode.toDataURL(upiUri);
       qrBuffer = Buffer.from(qr.split(",")[1], "base64");
-
     }
 
     // ================================
@@ -171,40 +165,49 @@ exports.completeWorkAndGenerateBill = async (req, res) => {
     await sendNotification(
       work.client._id,
       "client",
-      "Work Completed",
-      `Technician ${req.user.firstName} completed your ${work.serviceType} work. Please complete the payment.`,
-      "work_completed",
-      `work-${work.token}`
+      "Payment Pending",
+      `Aapka ${work.serviceType} work complete ho gaya hai. Bill dekhkar payment complete karein.`,
+      "payment_pending",
+      `bill-${bill._id}`
     );
 
     // ================================
-    // PUSH NOTIFICATION
+    // PUSH NOTIFICATION  ✅ WITH DETAILS
     // ================================
-const clientUser = await User.findById(work.client._id)
+    const clientUser = await User.findById(work.client._id)
       .select("fcmTokens firstName");
 
-    if (clientUser?.fcmTokens?.length) {
+    console.log("📲 CLIENT TOKENS:", clientUser?.fcmTokens || []);
+    console.log("🧾 BILL ID:", bill._id.toString());
+    console.log("🛠️ WORK ID:", work._id.toString());
+    console.log("💰 AMOUNT:", totalAmount);
 
+    if (clientUser?.fcmTokens?.length) {
       await sendPush(
         clientUser.fcmTokens,
-        "Work Completed",
-        `Your ${work.serviceType} service is completed. Please pay the bill.`,
+        "Payment Pending",
+        `Aapka ${work.serviceType} work complete please check the bill and pay `,
         {
           role: "CLIENT",
           type: "work_completed",
-          service: work.serviceType,
-          technicianName: req.user.firstName || "Technician",
-          workId: work._id.toString(),
-          billId: bill._id.toString()
+          service: String(work.serviceType || "Service"),
+          technicianName: String(req.user.firstName || "Technician"),
+          workId: String(work._id),
+          billId: String(bill._id),
+          amount: String(totalAmount),
+          paymentMethod: String(paymentMethod || "upi"),
+          upiUri: String(upiUri || ""),
+          clickableUPI: String(clickableUPI || ""),
+          status: "completed",
+          screen: "BillDetails"
         },
         clientUser._id
       );
 
-      console.log("✅ WORK COMPLETED PUSH SENT");
+      console.log("✅ PAYMENT PENDING PUSH SENT");
+    } else {
+      console.log("⚠️ No FCM tokens found for client");
     }
-
-
-    
 
     return res.status(200).json({
       success: true,
@@ -219,14 +222,12 @@ const clientUser = await User.findById(work.client._id)
     });
 
   } catch (err) {
-
     console.error("COMPLETE WORK ERROR:", err);
 
     return res.status(500).json({
       message: "Error completing work",
       error: err.message
     });
-
   }
 };
 
@@ -884,14 +885,21 @@ exports.generatePaymentReceiptPDF = async (req, res) => {
 
 }
 
+
+const Service = require("../model/servicecard");
+
 exports.getOrderSummary = async (req, res) => {
   try {
     const { workId } = req.params;
     const userId = req.user?._id;
 
     const work = await Work.findById(workId)
-      .populate("client")
-      .populate("assignedTechnician", "name profileImage rating");
+      .populate("client", "name mobile")
+      .populate(
+        "assignedTechnician",
+        "name fullname profileImage profilePic photo image avatar rating mobile phone"
+      )
+      .lean();
 
     if (!work) {
       return res.status(404).json({
@@ -908,32 +916,79 @@ exports.getOrderSummary = async (req, res) => {
     }
 
     const bill = await Bill.findOne({ workId })
-      .populate("technicianId", "name profileImage rating")
-      .populate("clientId", "name");
+      .populate(
+        "technicianId",
+        "name fullname profileImage profilePic photo image avatar rating mobile phone"
+      )
+      .populate("clientId", "name")
+      .lean();
 
-    if (!bill) {
-      return res.status(404).json({
-        success: false,
-        message: "Bill not found"
-      });
+    // 🔍 Optional service fetch for better title/image/rating
+    let serviceData = null;
+    if (work.serviceType) {
+      serviceData = await Service.findOne({
+        $or: [
+          { title: work.serviceType },
+          { serviceType: work.serviceType },
+          { specialization: { $in: work.specialization || [] } }
+        ]
+      }).lean();
     }
 
+    // 👨‍🔧 Technician fallback
+    const technicianSource = bill?.technicianId || work?.assignedTechnician || {};
+
+    const technicianName =
+      technicianSource?.name ||
+      technicianSource?.fullname ||
+      "Technician";
+
+    const technicianImage =
+      technicianSource?.profileImage ||
+      technicianSource?.profilePic ||
+      technicianSource?.photo ||
+      technicianSource?.image ||
+      technicianSource?.avatar ||
+      "";
+
+    const technicianRating =
+      technicianSource?.rating ||
+      serviceData?.rating ||
+      5;
+
+    // 🛠 Service title fallback
+    const serviceTitle =
+      serviceData?.title ||
+      work.serviceName ||
+      work.serviceType ||
+      work.category ||
+      work.workType ||
+      "Service";
+
+    // 💰 Payment rows
     const paymentRows = [];
 
-    // Service charge
-    if (Number(bill.serviceCharge || 0) > 0) {
+    const serviceCharge = Number(
+      bill?.serviceCharge ??
+      work?.invoice?.serviceCharge ??
+      work?.serviceCharge ??
+   
+      0
+    );
+
+    if (serviceCharge > 0) {
       paymentRows.push({
         label: "Service Charges",
-        amount: Number(bill.serviceCharge || 0),
+        amount: serviceCharge,
         type: "service_charge"
       });
     }
 
-    // Dynamic items
-    if (Array.isArray(bill.items) && bill.items.length > 0) {
+    // Dynamic items from Bill
+    if (Array.isArray(bill?.items) && bill.items.length > 0) {
       bill.items.forEach((item) => {
         paymentRows.push({
-          label: item.name,
+          label: item.name || "Item",
           qty: Number(item.qty || 0),
           price: Number(item.price || 0),
           amount: Number(item.qty || 0) * Number(item.price || 0),
@@ -942,67 +997,120 @@ exports.getOrderSummary = async (req, res) => {
       });
     }
 
-    // Taxes
+    // Fallback items from Work.invoice.usedMaterials if bill.items empty
+    else if (
+      Array.isArray(work?.invoice?.usedMaterials) &&
+      work.invoice.usedMaterials.length > 0
+    ) {
+      work.invoice.usedMaterials.forEach((item) => {
+        paymentRows.push({
+          label: item.name || "Item",
+          qty: Number(item.quantity || 0),
+          price: Number(item.price || 0),
+          amount: Number(item.quantity || 0) * Number(item.price || 0),
+          type: "item"
+        });
+      });
+    }
+
+    const taxes = Number(
+      bill?.taxes ??
+      work?.invoice?.tax ??
+      0
+    );
+
     paymentRows.push({
       label: "Taxes",
-      amount: Number(bill.taxes || 0),
+      amount: taxes,
       type: "tax"
     });
+
+    const totalPaidAmount = Number(
+      bill?.totalAmount ??
+      work?.invoice?.total ??
+      0
+    );
+
+    // 📍 Address fallback
+    const address =
+      work?.address?.fullAddress ||
+      work?.address ||
+      work?.location ||
+      "";
+
+    // 📅 Date/time fallback
+    const serviceDate =
+      work?.scheduleDate ||
+      work?.date ||
+      work?.createdAt ||
+      null;
+
+    const serviceTime =
+      work?.scheduleTime ||
+      work?.timeSlot ||
+      "";
 
     return res.status(200).json({
       success: true,
       message: "Order summary fetched successfully",
       data: {
         workId: work._id,
-        billId: bill._id,
-        status: bill.status,
-        paymentMethod: bill.paymentMethod,
+        billId: bill?._id || null,
+        status:
+          bill?.status ||
+          work?.payment?.status ||
+          work?.status ||
+          "pending",
+        paymentMethod:
+          bill?.paymentMethod ||
+          work?.payment?.method ||
+          work?.invoice?.payment ||
+          "",
 
         technician: {
-          id: bill.technicianId?._id || work.assignedTechnician?._id || null,
-          name:
-            bill.technicianId?.name ||
-            work.assignedTechnician?.name ||
-            "Technician",
-          service:
-            work.serviceName ||
-            work.category ||
-            work.workType ||
-            "Service",
-          rating:
-            bill.technicianId?.rating ||
-            work.assignedTechnician?.rating ||
-            5,
-          image:
-            bill.technicianId?.profileImage ||
-            work.assignedTechnician?.profileImage ||
-            ""
+          id: technicianSource?._id || null,
+          name: technicianName,
+          service: serviceTitle,
+          rating: technicianRating,
+          image: technicianImage
         },
 
         serviceDetails: {
-          arrivedAt: work.arrivedAt || "12:15pm",
-          date: work.scheduleDate || work.createdAt || null,
-          time: work.scheduleTime || "",
-          address:
-            work.address?.fullAddress ||
-            work.address ||
-            work.location ||
-            ""
+          arrivedAt: work?.arrivedAt || null,
+          date: serviceDate,
+          time: serviceTime,
+          address
         },
 
         paymentDetails: {
           rows: paymentRows,
-          totalPaidAmount: Number(bill.totalAmount || 0),
-          taxes: Number(bill.taxes || 0),
-          serviceCharge: Number(bill.serviceCharge || 0),
-          items: Array.isArray(bill.items) ? bill.items : []
+          totalPaidAmount,
+          taxes,
+          serviceCharge,
+          items: Array.isArray(bill?.items)
+            ? bill.items
+            : Array.isArray(work?.invoice?.usedMaterials)
+            ? work.invoice.usedMaterials
+            : []
         },
 
         extra: {
-          invoiceId: bill.invoiceId || "",
-          pdfUrl: bill.pdfUrl || "",
-          paidAt: bill.paidAt || null,
-          notes: bill.notes || ""
+          invoiceId:
+            bill?.invoiceId ||
+            work?.invoice?.invoiceNumber ||
+            "",
+          pdfUrl:
+            bill?.pdfUrl ||
+            work?.invoice?.pdfUrl ||
+            "",
+          paidAt:
+            bill?.paidAt ||
+            work?.payment?.paidAt ||
+            null,
+          notes:
+            bill?.notes ||
+            work?.remarks ||
+            ""
         }
       }
     });

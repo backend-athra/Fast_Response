@@ -1,19 +1,18 @@
 
 const mongoose= require('mongoose')
 const Work = require("../model/work");
-
+const serviceimage=require('../model/servicecard')
 
 
 const axios = require("axios");
+
+
 
 exports.getAllWorks = async (req, res) => {
   try {
     const clientId = req.user._id;
     const { status } = req.query;
     const filter = { client: clientId };
-
-    // console.log("Query Params:", req.query);
-
 
     if (status) {
       const statusArray = Array.isArray(status)
@@ -42,27 +41,72 @@ exports.getAllWorks = async (req, res) => {
       });
     }
 
+    // ✅ Fetch all service icons/details at once
+    const serviceTypes = [...new Set(works.map(w => w.serviceType))];
+    const serviceCards = await serviceimage.find({ serviceType: { $in: serviceTypes } });
+
+    const serviceMap = {};
+    serviceCards.forEach(card => {
+      serviceMap[card.serviceType] = {
+        cardIcon: card.cardIcon || null,
+        title: card.title || null,
+        price: card.price || null,
+        category: card.category || null
+      };
+    });
+
     const formattedWorks = works.map((work) => ({
       id: work._id,
       serviceType: work.serviceType,
+
+      // ✅ attach service card details
+      serviceDetails: serviceMap[work.serviceType] || null,
+
       specialization: work.specialization,
-      serviceCharge:work.serviceCharge,
+      serviceCharge: work.serviceCharge,
       description: work.description,
       location: work.location,
-      otp:work.otp,
+
+
+
+
+      
+      otp: work.otp,
       date: work.date,
       status: work.status,
       token: work.token,
+
+      // ✅ photos
+      beforephoto: work.beforephoto || [],
+      afterphoto: work.afterphoto || [],
+
+      // ✅ payment info
+      payment: {
+        method: work.payment?.method || null,
+        status: work.payment?.status || "pending",
+        paidAt: work.payment?.paidAt || null,
+        confirmedAt: work.payment?.confirmedAt || null,
+      },
+
+      // ✅ bill reference
+      billId: work.billId || null,
+
+      // ✅ timings
+      startedAt: work.startedAt || null,
+      completedAt: work.completedAt || null,
+      updatedAt: work.updatedAt || null,
       createdAt: work.createdAt,
+
       client: {
         name: work.client?.name,
         email: work.client?.email,
         phone: work.client?.phone,
       },
+
       assignedTechnician: work.assignedTechnician
         ? {
             technicianId: work.assignedTechnician._id,
-            name: work.assignedTechnician.firstName,
+            name: `${work.assignedTechnician.firstName || ""} ${work.assignedTechnician.lastName || ""}`.trim(),
             email: work.assignedTechnician.email,
             phone: work.assignedTechnician.phone,
             specialization: work.assignedTechnician.specialization,

@@ -2,6 +2,8 @@ const mongoose= require('mongoose')
 const Work = require("../model/work");
 const User = require("../model/user");
 const Booking=require("../model/BookOrder")
+
+const Service = require("../model/servicecard");
 const AdminNotification=require('../model/adminnotification')
 const { sendNotification } = require("../controllers/helpercontroller");
 const admin = require("firebase-admin");
@@ -594,7 +596,6 @@ exports.verifyWorkOTP = async (req, res) => {
 };
 exports.WorkStart = async (req, res) => {
   try {
-
     const { workId } = req.body;
     const technicianId = req.user._id;
 
@@ -602,15 +603,15 @@ exports.WorkStart = async (req, res) => {
       return res.status(400).json({ message: "Work ID is required" });
     }
 
-    
     const work = await Work.findById(workId);
-    if (!work) return res.status(404).json({ message: "Work not found" });
+    if (!work) {
+      return res.status(404).json({ message: "Work not found" });
+    }
 
     if (String(work.assignedTechnician) !== String(technicianId)) {
       return res.status(403).json({ message: "You are not assigned to this work" });
     }
 
-   
     const beforePhotos = req.files?.beforephotos || [];
     const beforeVideo = req.files?.beforevideo?.[0] || null;
 
@@ -624,41 +625,48 @@ exports.WorkStart = async (req, res) => {
     // PHOTO UPLOAD
     if (beforePhotos.length > 0) {
       const uploadedPhotos = await Promise.all(
-        beforePhotos.map(photo => uploadToCloudinary(photo.path, "work_before_photos"))
+        beforePhotos.map((photo) =>
+          uploadToCloudinary(photo.path, "work_before_photos")
+        )
       );
-      photoUrls = uploadedPhotos.map(file => file.secure_url);
+      photoUrls = uploadedPhotos.map((file) => file.secure_url);
     }
 
     // VIDEO UPLOAD
     if (beforeVideo) {
-      const uploadRes = await uploadToCloudinary(beforeVideo.path, "work_before_videos");
+      const uploadRes = await uploadToCloudinary(
+        beforeVideo.path,
+        "work_before_videos"
+      );
       videoUrl = uploadRes.secure_url;
     }
 
-  
+    // ✅ SAVE CORRECTLY IN DB
     work.status = "inprogress";
+    work.publicStatus = "inprogress";
     work.startedAt = new Date();
-    work.beforephotos = photoUrls;
-    work.beforevideo = videoUrl;
+    work.completedAt = null;
+
+    work.beforephoto = photoUrls || [];
+    work.beforevideo = videoUrl || "";
+
     await work.save();
 
     await User.findByIdAndUpdate(technicianId, {
       technicianStatus: "inprogress",
       onDuty: true,
-      availability: false
+      availability: false,
     });
 
- 
     await Booking.findOneAndUpdate(
       {
         technician: technicianId,
         user: work.client,
-        status: { $in: ["open", "taken", "dispatch"] }
+        status: { $in: ["open", "taken", "dispatch"] },
       },
       { status: "inprogress" }
     );
 
-    
     await sendNotification(
       work.client,
       "client",
@@ -669,8 +677,8 @@ exports.WorkStart = async (req, res) => {
     );
 
     const clientUser = await User.findById(work.client).select("fcmTokens");
-    if (clientUser?.fcmTokens?.length) {
 
+    if (clientUser?.fcmTokens?.length) {
       await sendPush(
         clientUser.fcmTokens,
         "Work Started",
@@ -680,7 +688,7 @@ exports.WorkStart = async (req, res) => {
           type: "work_started",
           service: String(work.serviceType || "Service"),
           technicianName: String(req.user?.firstName || "Technician"),
-          workId: String(work._id)
+          workId: String(work._id),
         },
         clientUser._id
       );
@@ -688,19 +696,15 @@ exports.WorkStart = async (req, res) => {
       console.log("✅ WORK START PUSH SENT");
     }
 
-  
     res.status(200).json({
       message: "Technician started the work successfully.",
-      photos: photoUrls,
-      video: videoUrl,
-      work
+      photos: work.beforephoto || [],
+      video: work.beforevideo || "",
+      work,
     });
-
   } catch (err) {
-
     console.error("❌ Work Start Error:", err);
     res.status(500).json({ message: "Server error" });
-
   }
 };
   exports.confirmPayment = async (req, res) => {
@@ -2193,42 +2197,155 @@ exports.rescheduleOrder = async (req, res) => {
 
 
 
+
 exports.getWorkStatus = async (req, res) => {
   try {
     const { workId } = req.params;
 
-    const work = await Work.findById(workId).select(
-      "status token updatedAt beforephoto afterphoto"
-    );
+    const work = await Work.findById(workId)
+      .populate("assignedTechnician", "name fullname profilePic photo image avatar rating mobile phone")
+      .populate("client", "name mobile")
+      .lean();
 
     if (!work) {
       return res.status(404).json({ message: "Work not found" });
     }
 
-    res.status(200).json({
-      success: true,
-      data: {
-        workId: work._id,
-        status: work.status || "",
-        token: work.token || "",
-        beforephoto: work.beforephoto || "",
-        afterphoto: work.afterphoto || "",
-        updatedAt: work.updatedAt || null,
+    // 🔍 Optional service fetch
+    let serviceData = null;
+    if (work.serviceType) {
+      serviceData = await Service.findOne({
+        $or: [
+          { title: work.serviceType },
+          { serviceType: work.serviceType },
+          { specialization: { $in: work.specialization || [] } }
+        ]
+      }).lean();
+    }
+
+    // 👨‍🔧 Technician image fallback
+    const technicianImage =
+      work?.assignedTechnician?.profilePic ||
+      work?.assignedTechnician?.photo ||
+      work?.assignedTechnician?.image ||
+      work?.assignedTechnician?.avatar ||
+      "";
+
+    // ⭐ Rating fallback
+    const technicianRating =
+      work?.assignedTechnician?.rating ||
+      serviceData?.rating ||
+      4.5;
+
+    // 💰 Payment breakdown
+    const serviceCharge =
+      work?.invoice?.serviceCharge ??
+      work?.serviceCharge ??
+      0;
+
+    const usedMaterials = work?.invoice?.usedMaterials || [];
+
+    const materialBreakdown = usedMaterials.map((item) => ({
+      name: item.name || "Material",
+      quantity: item.quantity || 1,
+      price: item.price || 0,
+      total: (item.quantity || 1) * (item.price || 0),
+    }));
+
+    const materialsTotal = materialBreakdown.reduce((sum, item) => sum + item.total, 0);
+
+    const tax = work?.invoice?.tax ?? 0;
+
+    const subtotal =
+      work?.invoice?.subtotal ??
+      (serviceCharge + materialsTotal);
+
+    const totalPaid =
+      work?.invoice?.total ??
+      (subtotal + tax);
+
+    res.json({
+      // ====== OLD RESPONSE SAME ======
+      workId: work._id,
+      status: work.status,
+      token: work.token,
+      beforephoto: work.beforephoto || [],
+      afterphoto: work.afterphoto || [],
+      updatedAt: work.updatedAt,
+
+      // ====== NEW EXTRA FIELDS ======
+      publicStatus: work.publicStatus || "",
+      description: work.description || "",
+      remarks: work.remarks || "",
+      issueCount: work.issueCount || 0,
+
+      // technician
+      technicianId: work?.assignedTechnician?._id || null,
+      technicianName:
+        work?.assignedTechnician?.name ||
+        work?.assignedTechnician?.fullname ||
+        "Technician",
+      technicianImage,
+      technicianRating,
+      technicianPhone:
+        work?.assignedTechnician?.mobile ||
+        work?.assignedTechnician?.phone ||
+        "",
+
+      // client
+      clientId: work?.client?._id || null,
+      clientName: work?.client?.name || "",
+      clientPhone: work?.client?.mobile || "",
+
+      // service
+      serviceTitle: serviceData?.title || work.serviceType || "Service",
+      serviceCategory: serviceData?.category || "",
+      serviceIcon: serviceData?.cardIcon || "",
+      serviceImage: serviceData?.image || "",
+      serviceType: work.serviceType || "",
+      specialization: work.specialization || [],
+
+      // schedule
+      date: work?.date || "",
+      timeSlot: work?.timeSlot || "",
+
+      // location
+      location: work.location || "",
+      coordinates: {
+        lat: work?.coordinates?.lat || null,
+        lng: work?.coordinates?.lng || null,
       },
+
+      // timing
+      startedAt: work?.startedAt || null,
+      completedAt: work?.completedAt || null,
+      arrivedAt: work?.arrivedAt || null,
+
+      // payment
+      paymentMethod: work?.payment?.method || work?.invoice?.payment || "",
+      paymentStatus: work?.payment?.status || "pending",
+      paidAt: work?.payment?.paidAt || null,
+      confirmedAt: work?.payment?.confirmedAt || null,
+      upiApp: work?.upiApp || "",
+
+      // invoice
+      invoiceNumber: work?.invoice?.invoiceNumber || "",
+      invoicePdfUrl: work?.invoice?.pdfUrl || "",
+
+      // amount breakdown
+      serviceCharge,
+      materials: materialBreakdown,
+      materialsTotal,
+      subtotal,
+      tax,
+      totalPaid,
+
+      // raw issues if frontend needs
+      issues: work?.issues || [],
     });
+
   } catch (error) {
     console.error("getWorkStatus error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      data: {
-        workId: "",
-        status: "",
-        token: "",
-        beforephoto: "",
-        afterphoto: "",
-        updatedAt: null,
-      },
-    });
+    res.status(500).json({ message: "Server error" });
   }
 };
