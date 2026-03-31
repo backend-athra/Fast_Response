@@ -1,0 +1,62 @@
+{
+  "name": "fast_response'",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "jest --detectOpenHandles --forceExit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "\"# fast_response\" \r \"# fast_response\" \r \"# fast_response\"",
+  "dependencies": {
+    "@sendgrid/mail": "^8.1.6",
+    "@socket.io/redis-adapter": "^8.3.0",
+    "axios": "^1.13.1",
+    "bcrypt": "^6.0.0",
+    "bcryptjs": "^3.0.2",
+    "cloudinary": "^2.8.0",
+    "connect-redis": "^7.0.0",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "dayjs": "^1.11.19",
+    "dotenv": "^17.2.3",
+    "exceljs": "^4.4.0",
+    "express": "^5.1.0",
+    "express-session": "^1.18.2",
+    "firebase-admin": "^13.6.0",
+    "googleapis": "^161.0.0",
+    "ioredis": "^5.8.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.19.1",
+    "multer": "^2.0.2",
+    "nodemailer": "^7.0.9",
+    "nodemailer.js": "^0.0.2-security",
+    "passport": "^0.7.0",
+    "passport-facebook": "^3.0.0",
+    "passport-google-oauth20": "^2.0.0",
+    "pdf-poppler": "^0.2.3",
+    "pdfkit": "^0.17.2",
+    "qrcode": "^1.5.4",
+    "redis": "^5.10.0",
+    "sharp": "^0.34.5",
+    "socket.io": "^4.8.1",
+    "tesseract.js": "^7.0.0",
+    "twilio": "^5.11.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/constructAbility/fast_response.git"
+  },
+  "bugs": {
+    "url": "https://github.com/constructAbility/fast_response/issues"
+  },
+  "homepage": "https://github.com/constructAbility/fast_response#readme",
+  "type": "commonjs",
+  "devDependencies": {
+    "jest": "^30.2.0",
+    "mongodb-memory-server": "^10.4.1",
+    "supertest": "^7.1.4"
+  }
+}

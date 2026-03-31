@@ -1,0 +1,156 @@
+[
+  {
+    "title": "Fabrication & Installation",
+    "category": "Fabrication",
+    "serviceType": "Fabrication",
+    "specialization": [
+      "fabricator",
+      "welder"
+    ]
+  },
+  {
+    "title": "Shutter Making, Installation & Service",
+    "category": "Construction",
+    "serviceType": "Shutter Work",
+    "specialization": [
+      "fabricator",
+      "mechanic"
+    ]
+  },
+  {
+    "title": "M.S Fabrication & Grill Gate Fabrication",
+    "category": "Fabrication",
+    "serviceType": "Metal Fabrication",
+    "specialization": [
+      "fabricator",
+      "welder"
+    ]
+  },
+  {
+    "title": "Tin Shade / Factory Shade Installation",
+    "category": "Construction",
+    "serviceType": "Shade Installation",
+    "specialization": [
+      "fabricator",
+      "construction"
+    ]
+  },
+  {
+    "title": "Aluminium Door, Window & Cabin Installation",
+    "category": "Fabrication",
+    "serviceType": "Aluminium Work",
+    "specialization": [
+      "aluminium technician",
+      "fabricator"
+    ]
+  },
+  {
+    "title": "SS Welding Work",
+    "category": "Fabrication",
+    "serviceType": "Welding",
+    "specialization": [
+      "welder"
+    ]
+  },
+  {
+    "title": "Racks & Shelves Installation Work",
+    "category": "Carpentry",
+    "serviceType": "Installation",
+    "specialization": [
+      "carpenter"
+    ]
+  },
+  {
+    "title": "Interior & Furniture",
+    "category": "Interior",
+    "serviceType": "Interior Work",
+    "specialization": [
+      "interior designer",
+      "carpenter"
+    ]
+  },
+  {
+    "title": "Modular Kitchen Work",
+    "category": "Interior",
+    "serviceType": "Kitchen Work",
+    "specialization": [
+      "interior designer",
+      "carpenter"
+    ]
+  },
+  {
+    "title": "Furniture Work",
+    "category": "Carpentry",
+    "serviceType": "Carpentry",
+    "specialization": [
+      "carpenter"
+    ]
+  },
+  {
+    "title": "Plumbing Services",
+    "category": "Plumbing",
+    "serviceType": "Plumbing",
+    "specialization": [
+      "plumber"
+    ]
+  },
+  {
+    "title": "Electrical & Mechanical Services",
+    "category": "Electrical",
+    "serviceType": "Electrical",
+    "specialization": [
+      "electrician",
+      "mechanic"
+    ]
+  },
+  {
+    "title": "AC Installation & Services",
+    "category": "HVAC",
+    "serviceType": "AC Repair",
+    "specialization": [
+      "actechnician",
+      "hvac"
+    ]
+  },
+  {
+    "title": "HVAC Work",
+    "category": "HVAC",
+    "serviceType": "HVAC",
+    "specialization": [
+      "hvac"
+    ]
+  },
+  {
+    "title": "CCTV Security Services",
+    "category": "Security",
+    "serviceType": "Security",
+    "specialization": [
+      "cctv technician"
+    ]
+  },
+  {
+    "title": "Solar Plant Installation & Maintenance",
+    "category": "Electrical",
+    "serviceType": "Solar",
+    "specialization": [
+      "solar technician",
+      "electrician"
+    ]
+  },
+  {
+    "title": "Automobile Services",
+    "category": "Automobile",
+    "serviceType": "Auto Repair",
+    "specialization": [
+      "mechanic"
+    ]
+  },
+  {
+    "title": "Body Maker",
+    "category": "Automobile",
+    "serviceType": "Automobile Fabrication",
+    "specialization": [
+      "body maker"
+    ]
+  }
+]

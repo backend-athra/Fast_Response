@@ -1,0 +1,115 @@
+const express = require('express');
+const { protect, authorize } = require('../middelware/authMiddelware');
+const upload = require("../utils/upload");
+
+const router = express.Router();
+
+const { 
+  createWork, 
+  findMatchingTechnicians, 
+  bookTechnician, 
+  WorkStart,
+  WorkComplete,
+  trackTechnician,
+  verifyWorkOTP,
+  updateLocation,getClientWorkStatus,reportWorkIssue,generatePaymentRecei,getLocation,saveLocation,getRoutes,selectRoute,subscribe,getSubscribers,getWorkStatus,cancelOrder,rescheduleOrder,reachLocation
+} = require('../controllers/workController');
+const { 
+ completeWorkAndGenerateBill ,getTechnicianSummary
+} = require('../controllers/techniciancontroller');
+
+const { getAllWorks  } = require('../controllers/statuscontrollers');
+
+
+router.post('/work/create', protect, createWork);
+
+
+// router.post('/work/find-technicians', protect, findMatchingTechnicians);
+
+router.post('/work/book-technician', protect, bookTechnician);
+
+router.post('/work/start',protect, authorize('technician'),upload.fields([{ name: "beforephotos", maxCount: 4 },{ name: "beforevideo", maxCount: 1 }]),WorkStart);
+// router.post('/work/complete-1', protect, upload.single("afterphoto"),authorize('technician'),  WorkComplete  );
+
+router.post(
+  "/work/complete",
+  protect,
+  authorize("technician"),
+  upload.fields([
+    { name: "afterphotos", maxCount: 4 },
+    { name: "aftervideo", maxCount: 1 }
+  ]),
+  completeWorkAndGenerateBill
+);
+router.post('/work/issue', protect, authorize('technician'), reportWorkIssue);
+
+
+router.get('/getAllWork', protect, getAllWorks);// ye clinet ka saare work ko dikhayega 
+// router.get("/technician/summary", protect , authorize('technician'), getTechnicianSummary);
+// router.get('/issuetoadmin',getAdminNotifications);
+
+router.patch('/work/update-location',protect,updateLocation);
+
+router.get('/track-technician/:workId',protect,trackTechnician)
+
+router.get('/client-work/:workId',protect, authorize('client'),getClientWorkStatus)
+
+
+router.post("/savelocation", protect,authorize('client'), saveLocation);
+
+
+router.get("/getlocation", protect,authorize('client'), getLocation);
+
+router.post('/work/get-routes', protect, authorize('technician'), getRoutes);
+router.put('/work/select-route/:workId', protect, authorize('technician'), selectRoute);
+
+router.post('/subcribe',subscribe)
+router.get('/getsub',protect,authorize('admin'),getSubscribers)
+router.post('/paybill/:workId',protect, authorize('client'),generatePaymentRecei)
+router.get(
+  "/work/status/:workId",protect, authorize('client')
+  ,getWorkStatus
+);
+
+// app.post("/work/:workId/upload-invoice", upload.single("file"), async (req, res) => {
+//   try {
+//     const workId = req.params.workId;
+//     const filePath = req.file.path;
+
+
+//     const { data: { text } } = await tesseract.recognize(filePath, "eng");
+
+
+//     const invoiceNumber = text.match(/BILL-\w+-\d+/)?.[0] || null;
+//     const totalAmount = text.match(/Total Bill:\s*([\d.]+)/)?.[1] || null;
+
+   
+//     const work = await Work.findByIdAndUpdate(
+//       workId,
+//       {
+//         "invoice.invoiceNumber": invoiceNumber,
+//         "invoice.total": totalAmount,
+//         "invoice.pdfUrl": filePath,
+//       },
+//       { new: true }
+//     );
+
+   
+//     res.json({
+//       message: "Invoice uploaded & parsed",
+//       invoiceNumber: work.invoice.invoiceNumber,
+//       totalAmount: work.invoice.total,
+//     });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).send("Error processing invoice");
+//   }
+// });
+ 
+router.patch(
+  "/technician/reach-location",protect,authorize('technician'),reachLocation
+);
+router.post("/cancel-order/:workId",protect,authorize('client'),cancelOrder);
+router.post("/re-order/:workId",protect,authorize('client'),rescheduleOrder);
+router.post("/verify-otp/:workId",protect,authorize('technician'), verifyWorkOTP);
+module.exports = router;

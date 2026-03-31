@@ -1,0 +1,1016 @@
+const fs = require("fs");
+const path = require("path");
+const QRCode = require("qrcode");
+const { uploadToCloudinary } = require("../utils/cloudinaryUpload"); 
+const {generatePaymentReceiptPDF}= require("../utils/finalinvoice");
+const { generateBillPDF } = require("../utils/Invoice"); 
+const sendEmail = require("../utils/sendemail");
+const { sendNotification } = require("../controllers/helpercontroller");
+const Work = require("../model/work");
+const User = require("../model/user");
+const Bill = require("../model/Bill");
+const Booking=require('../model/BookOrder')
+const admin = require("firebase-admin");
+const { sendPush } = require("../utils/sendpush");
+const projectRoot = process.cwd();
+const invoicesFolder = path.join(projectRoot, "invoices");
+const {
+  emitWorkStatus,
+  emitTechnicianLocation
+} = require("../utils/socketEmitter");
+
+
+if (!fs.existsSync(invoicesFolder)) {
+  fs.mkdirSync(invoicesFolder, { recursive: true });
+}
+
+exports.completeWorkAndGenerateBill = async (req, res) => {
+  try {
+
+    const { workId, paymentMethod = "upi", upiId, upiApp } = req.body;
+    const technicianId = req.user._id;
+
+    const work = await Work.findById(workId).populate("client");
+
+    if (!work) {
+      return res.status(404).json({ message: "Work not found" });
+    }
+
+    if (String(work.assignedTechnician) !== String(technicianId)) {
+      return res.status(403).json({ message: "You are not assigned to this work" });
+    }
+
+    // ================================
+    // FILES
+    // ================================
+
+    const afterPhotos = req.files?.afterphotos || [];
+    const afterVideo = req.files?.aftervideo?.[0] || null;
+
+    if (afterPhotos.length === 0) {
+      return res.status(400).json({ message: "After photo required" });
+    }
+
+    if (afterPhotos.length > 4) {
+      return res.status(400).json({ message: "Maximum 4 photos allowed" });
+    }
+
+    let photoUrls = [];
+    let videoUrl = null;
+
+    // ================================
+    // UPLOAD PHOTOS
+    // ================================
+
+    if (afterPhotos.length > 0) {
+
+      const uploadPromises = afterPhotos.map(photo =>
+        uploadToCloudinary(photo.path, "after_photos")
+      );
+
+      const uploaded = await Promise.all(uploadPromises);
+
+      photoUrls = uploaded.map(file => file.secure_url);
+
+    }
+
+    // ================================
+    // UPLOAD VIDEO
+    // ================================
+
+    if (afterVideo) {
+
+      const uploadRes = await uploadToCloudinary(
+        afterVideo.path,
+        "after_videos"
+      );
+
+      videoUrl = uploadRes.secure_url;
+
+    }
+
+    // SAVE FILES
+    work.afterphotos = photoUrls;
+    work.aftervideo = videoUrl;
+
+    // ================================
+    // BILL CALCULATION
+    // ================================
+
+    const totalAmount = Number(work.serviceCharge);
+
+    let upiUri = null;
+    let clickableUPI = null;
+    let qrBuffer = null;
+
+    if (paymentMethod === "upi") {
+
+      const finalUpi = upiId || process.env.UPI_ID;
+
+      const name = encodeURIComponent(process.env.COMPANY_NAME || "FAST RESPONSE");
+
+      upiUri =
+        `upi://pay?pa=${finalUpi}&pn=${name}&am=${totalAmount}&cu=INR&tn=Service%20Payment`;
+
+      clickableUPI =
+        `https://upi.me/pay?pa=${finalUpi}&pn=${name}&am=${totalAmount}&cu=INR&tn=Service%20Payment`;
+
+      const qr = await QRCode.toDataURL(upiUri);
+      qrBuffer = Buffer.from(qr.split(",")[1], "base64");
+
+    }
+
+    // ================================
+    // CREATE BILL
+    // ================================
+
+    const bill = await Bill.create({
+      workId: work._id,
+      technicianId,
+      clientId: work.client._id,
+      serviceCharge: totalAmount,
+      totalAmount,
+      paymentMethod,
+      upiUri,
+      clickableUPI,
+      status: "sent"
+    });
+
+    // ================================
+    // UPDATE WORK
+    // ================================
+
+    work.status = "completed";
+    work.completedAt = new Date();
+    work.billId = bill._id;
+
+    await work.save();
+
+    emitWorkStatus(work);
+
+    // ================================
+    // UPDATE BOOKING
+    // ================================
+
+    await Booking.findOneAndUpdate(
+      {
+        technician: technicianId,
+        user: work.client._id,
+        status: { $in: ["Requested", "approved", "dispatch", "inprogress"] }
+      },
+      {
+        status: "completed",
+        completedAt: new Date()
+      }
+    );
+
+    // ================================
+    // DATABASE NOTIFICATION
+    // ================================
+
+    await sendNotification(
+      work.client._id,
+      "client",
+      "Work Completed",
+      `Technician ${req.user.firstName} completed your ${work.serviceType} work. Please complete the payment.`,
+      "work_completed",
+      `work-${work.token}`
+    );
+
+    // ================================
+    // PUSH NOTIFICATION
+    // ================================
+const clientUser = await User.findById(work.client._id)
+      .select("fcmTokens firstName");
+
+    if (clientUser?.fcmTokens?.length) {
+
+      await sendPush(
+        clientUser.fcmTokens,
+        "Work Completed",
+        `Your ${work.serviceType} service is completed. Please pay the bill.`,
+        {
+          role: "CLIENT",
+          type: "work_completed",
+          service: work.serviceType,
+          technicianName: req.user.firstName || "Technician",
+          workId: work._id.toString(),
+          billId: bill._id.toString()
+        },
+        clientUser._id
+      );
+
+      console.log("✅ WORK COMPLETED PUSH SENT");
+    }
+
+
+    
+
+    return res.status(200).json({
+      success: true,
+      bill,
+      payment: {
+        upiUri,
+        clickableUPI,
+        upiApp
+      },
+      afterPhotos: photoUrls,
+      afterVideo: videoUrl
+    });
+
+  } catch (err) {
+
+    console.error("COMPLETE WORK ERROR:", err);
+
+    return res.status(500).json({
+      message: "Error completing work",
+      error: err.message
+    });
+
+  }
+};
+
+
+
+
+// abhi hum ye code use kr rahe h technician k work count k liye 
+exports.getTechnicianSummary1 = async (req, res) => {
+  try {
+    const technicianId = req.user._id;
+
+   
+    const totalWorkCount = await Work.countDocuments({
+      assignedTechnician: technicianId,
+    });
+
+    const activeCount = await Work.countDocuments({
+      assignedTechnician: technicianId,
+      status: { $in: ["on_the_way", "inprogress", "dispatch"] },
+    });
+
+  
+    const completedCount = await Work.countDocuments({
+      assignedTechnician: technicianId,
+      status: "ompleted",
+    });
+
+ 
+    const rejectedCount = await Work.countDocuments({
+      assignedTechnician: technicianId,
+      status: "rejected",
+    });
+
+   
+    const completedWorks = await Work.find({
+      assignedTechnician: technicianId,
+      status: "completed",
+    });
+
+    const totalEarnings = completedWorks.reduce((sum, work) => {
+      const invoiceTotal = work.invoice?.total || 0;
+      const serviceCharge = work.serviceCharge || 0;
+      return sum + invoiceTotal + serviceCharge;
+    }, 0);
+
+ 
+    res.status(200).json({
+      technicianId,
+      summary: {
+        totalWorkCount,
+        activeCount,
+        completedCount,
+        rejectedCount,
+        totalEarnings,
+      },
+    });
+
+  } catch (error) {
+    console.error("Error fetching technician summary:", error);
+    res.status(500).json({
+      message: "Error fetching technician summary",
+      error: error.message,
+    });
+  }
+};
+
+
+
+exports.getTechnicianSummary = async (req, res) => {
+  try {
+    const technicianId = req.user._id;
+
+    const works = await Work.find({ technician: technicianId })
+      .populate("client", "fisrtName lastName date phone email location")
+      .populate("supervisor", "name")
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: works.length,
+      works,
+    });
+  } catch (err) {
+    console.error("❌ Technician Summary Error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Unable to fetch technician summary",
+    });
+  }
+};
+
+exports.getAvailableJobs = async (req, res) => {
+  try {
+    const technicianId = req.user._id;
+    const technician = await User.findById(technicianId);
+    if (!technician) return res.status(404).json({ message: "Technician not found" });
+
+
+    const jobs = await Work.find({
+      status: "open",
+      specialization: { $in: technician.specialization },
+      location: { $regex: new RegExp(technician.location, "i") },
+    });
+
+    res.status(200).json({
+      message: "Available jobs fetched successfully",
+      jobs,
+    });
+  } catch (err) {
+    console.error("Get Available Jobs Error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+
+// exports.approveJob = async (req, res) => {
+//   try {
+//     const technicianId = req.user._id;
+//     const { workId } = req.body;
+    
+//     const userId= await Work.findById(workId).select("client serviceCharge token");
+//     console.log(userId)
+//     const work = await Work.findById(workId);
+//     if (!work) return res.status(404).json({ message: "Work not found" });
+
+//     if (!work.assignedTechnician) {
+//       return res.status(400).json({ message: "No technician assigned to this work" });
+//     }
+
+//     // if (work.assignedTechnician.toString() !== technicianId.toString()) {
+//     //   return res.status(403).json({ message: "You are not authorized to approve this job" });
+//     // }
+
+//        work.status = "approved";
+// emitWorkStatus(work);
+//    await sendNotification(
+//   userId,
+//   "client",
+//   "Booking Confirmed",
+//   `Your technician ${technicianId.firstName} has been booked successfully.the service type is ${userId.serviceType}`,
+//   "booking_confirmed",
+//   `work-${userId.token}`
+// );
+// const clientUser = await User.findById(userId.client).select("fcmToken");
+// if (clientUser?.fcmToken) {
+//   await admin.messaging().send({
+//     token: clientUser.fcmToken,
+//     // notification: {
+//     //   title: "Booking Confirmed",
+//     //   body
+       
+//     // },
+//     data: {
+//       type: "Booking Confirmed",
+//       link: `work-${userId.token}`,
+//     },
+//   });
+// }
+//     res.status(200).json({
+//       success: true,
+//       message: "Job approved successfully",
+//       work,
+//     });
+
+//   } catch (error) {
+//     console.error("Approve job error:", error);
+//     res.status(500).json({ message: "Server error" });
+//   }
+// };
+exports.approveJob = async (req, res) => {
+  try {
+
+    const technicianId = req.user._id;
+    const { workId } = req.body;
+
+    // 🔥 WORK FETCH
+    const work = await Work.findById(workId)
+      .populate("assignedTechnician");
+
+    if (!work) {
+      return res.status(404).json({ message: "Work not found" });
+    }
+
+    if (!work.assignedTechnician) {
+      return res.status(400).json({ message: "No technician assigned to this work" });
+    }
+
+    // 🔥 CLIENT INFO
+    const client = await User.findById(work.client)
+      .select("fcmTokens firstName");
+
+    // 🔁 UPDATE STATUS
+    work.status = "approved";
+    await work.save();
+
+    // 🔁 SOCKET UPDATE
+    emitWorkStatus(work);
+
+    // 🔁 DATABASE NOTIFICATION
+    await sendNotification(
+      work.client,
+      "client",
+      "Booking Confirmed",
+      `Your technician ${work.assignedTechnician.firstName} has been booked successfully. The service type is ${work.serviceType}`,
+      "work_approved",
+      `work-${work.token}`
+    );
+
+    // =========================
+    // 🔥 CLIENT PUSH NOTIFICATION
+    // =========================
+
+    if (client?.fcmTokens?.length) {
+
+      await sendPush(
+        client.fcmTokens,
+        "Work Approved",
+        "Technician has approved your service request",
+        {
+          role: "CLIENT",
+          type: "work_approved",
+
+          service: work.serviceType || "Service",
+          technicianName: work.assignedTechnician.firstName || "Technician",
+
+          eta: "30 mins",
+          phone: work.assignedTechnician.phone || "",
+
+          workId: work._id
+        },
+        client._id
+      );
+
+      console.log("✅ WORK_APPROVED PUSH SENT");
+
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Job approved successfully",
+      work
+    });
+
+  } catch (error) {
+
+    console.error("Approve job error:", error);
+
+    res.status(500).json({
+      message: "Server error"
+    });
+
+  }
+};
+
+
+
+exports.getTechnicianSummarybycount = async (req, res) => {
+  try {
+    const technicianId = req.user._id; 
+    const works = await Work.find({ technicianId }) 
+      .populate("clientId", "firstName lastName phone email location")
+      .populate("billId")
+      .sort({ createdAt: -1 });
+
+    const completed = works.filter(w => w.status === "completed");
+    const inProgress = works.filter(w => ["inprogress", "payment_done"|| "confirm"].includes(w.status));
+    const upcoming = works.filter(w => ["approved", "on_the_way", "open", "dispatch"].includes(w.status));
+    const onHold = works.filter(w => ["onhold_parts", "rescheduled", "escalated"].includes(w.status));
+
+    const totalEarnings = works.reduce((sum, w) => sum + (w.billId?.totalAmount || 0), 0);
+
+    res.status(200).json({
+      success: true,
+
+      totalWorkCount: works.length,   // 🌟 NEW FIELD ADDED 🌟
+
+      summary: {
+        total: works.length,
+        completed: completed.length,
+        inProgress: inProgress.length,
+        upcoming: upcoming.length,
+        onHold: onHold.length,
+        totalEarnings,
+      },
+
+      data: {
+        completed,
+        inProgress,
+        upcoming,
+        onHold,
+      },
+    });
+  } catch (error) {
+    console.error("Technician summary error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+
+exports.getAllTechnicianWorks = async (req, res) => {
+  try {
+    const technicianId = req.user._id;
+
+  
+    const works = await Work.find({ assignedTechnician: technicianId })
+      .populate("client", "firstName lastName phone email location")
+      .populate("billId")
+      .sort({ createdAt: -1 }); 
+
+    if (!works.length) {
+      return res.status(200).json({
+        success: true,
+        message: "No works assigned yet",
+        works: [],
+      });
+    }
+
+   
+    const categorized = {
+      completed: works.filter(w => w.status === "completed"),
+      inProgress: works.filter(w => ["inprogress", "payment_done" || "confirm"].includes(w.status)),
+      upcoming: works.filter(w => ["approved", "on_the_way",  "open", "dispatch"].includes(w.status)),
+      onHold: works.filter(w => ["onhold_parts", "rescheduled", "escalated"].includes(w.status)),
+    };
+
+    res.status(200).json({
+      success: true,
+      count: works.length,
+      works,
+      categorized,
+    });
+  } catch (error) {
+    console.error(" Error fetching all technician works:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching technician works",
+      error: error.message,
+    });
+  }
+};
+
+exports.confirmPayment = async (req, res) => {
+  try {
+    const { workId, paymentMethod } = req.body; 
+    const technicianId = req.user._id;
+    const userId=await Work.findById(workId).select("client token serviceType");
+    const work = await Work.findById(workId)
+      .populate("client", "firstName email phone")
+      .populate("assignedTechnician", "firstName token email role phone");
+
+    if (!work) return res.status(404).json({ message: "Work not found" });
+
+
+    if (String(work.assignedTechnician?._id) !== String(technicianId)) {
+      return res.status(403).json({ message: "Unauthorized: not your assigned work" });
+    }
+
+   
+    // if (work.status!=="completed") {
+    //   return res.status(400).json({ message: "Work must be completed before confirming payment" });
+    // }
+
+    
+    if (!["cash", "upi"].includes(paymentMethod)) {
+      return res.status(400).json({ message: "Invalid payment method" });
+    }
+
+   
+    work.payment = {
+      method: paymentMethod,
+      status: "payment_done",
+      confirmedBy: technicianId,
+      confirmedAt: new Date(),
+      paidAt: work.payment?.paidAt || new Date(), 
+    };
+
+   
+    work.status = "payment_done";
+    await work.save();
+    emitWorkStatus(work);
+ const receiptFilePath = path.join(
+      invoicesFolder,
+      `payment_receipt_${work.token}.pdf`
+    );
+
+    if (fs.existsSync(receiptFilePath)) fs.unlinkSync(receiptFilePath);
+
+    await generatePaymentReceiptPDF(
+      work,
+      work.assignedTechnician,
+      work.client,
+      receiptFilePath
+    );
+
+    const pdfBuffer = fs.readFileSync(receiptFilePath);
+    const emailBody = `
+      <p>Hello ${work.client.firstName || ""},</p>
+      <p>Your payment for Work ID <b>${work.token}</b> has been successfully confirmed.</p>
+      <p><b>Payment Method:</b> ${paymentMethod.toUpperCase()}</p>
+      <p><b>Technician:</b> ${work.assignedTechnician.firstName}</p>
+      <p>Your payment receipt is attached as a PDF.</p>
+    `;
+
+    await sendEmail(
+      work.client.email,
+      "Payment Receipt - Thank You",
+      emailBody,
+      [
+        {
+          content: pdfBuffer.toString("base64"),
+          filename: `payment_receipt_${work.token}.pdf`,
+          type: "application/pdf",
+          disposition: "attachment",
+        },
+      ]
+    );
+
+   await sendNotification(
+  userId.client,
+  "client",
+  "Payment Successful",
+  `Your technician ${technicianId.firstName} complete your work.the service type is ${userId.serviceType}.Payment type:${paymentMethod}`,
+  "payment_received",
+  `work-${userId.token}`
+)
+// const clientUser = await User.findById(userId.client).select("fcmToken");
+// if (clientUser?.fcmToken) {
+//   await admin.messaging().send({
+//     token: clientUser.fcmToken,
+//     notification: {
+//       title: "payment_Done",
+//       body: `Your Payment done. Thanks for choosing us`,
+ 
+//     },
+//     data: {
+//       type: "payment_Done",
+//       link: `work-${userId.token}`,
+//     },
+//   });
+// }
+    const clientUser = await User.findById(userId.client).select("fcmToken");
+
+    /**
+     * 🔥 CUSTOM FCM PUSH (WORK_APPROVED)
+     */
+    if (clientUser?.fcmToken) {
+
+      await admin.messaging().send({
+        token: clientUser.fcmToken,
+
+        android: {
+          priority: "high",
+        },
+
+        data: {
+          // 👇 FRONTEND MATCHING KEYS
+          title: "Payment confirm ",
+          body: "Technician has confirmed your service payment",
+
+          role: "CLIENT",
+          type: "payment_received",
+
+          service: userId.serviceType || "Service",
+          technicianName: work.assignedTechnician.firstName || "Technician",
+          // eta: "30 mins",
+
+          phone: work.assignedTechnician.phone || "",
+
+          workId: work._id.toString()
+        },
+      });
+
+      console.log("✅ WORK_APPROVED PUSH SENT");
+
+    }
+
+
+    res.status(200).json({
+      success: true,
+      message: "Payment confirmed successfully by technician.",
+      payment: work.payment,
+    });
+  } catch (err) {
+    console.error(" Confirm Payment Error:", err);
+    res.status(500).json({ message: "Server error while confirming payment." });
+  }
+};
+
+
+
+
+exports.raiseWorkIssue = async (req, res) => {
+  try {
+    const { workId, issueType, remarks, specializationRequired, reason } = req.body;
+    console.log(req.body)
+    const technicianId =
+      req.user && req.user._id ? req.user._id : req.body.technicianId;
+
+    const work = await Work.findById(workId);
+    if (!work) return res.status(404).json({ message: "Work not found" });
+
+    
+    const issueData = {
+      issueType,
+      remarks,
+      raisedBy: technicianId,
+      status: "open"
+    };
+
+    switch (issueType) {
+      case "need_parts":
+        work.status = "inprogress";
+
+        break;
+
+      case "need_specialist":
+        issueData.specializationRequired = specializationRequired;
+        issueData.reason = reason;
+        work.status = "inprogress";
+        break;
+
+      case "customer_unavailable":
+        work.status = "inprogress";
+        break;
+
+
+        
+       case "cannot_reach_location":
+
+        
+        work.status = "cancelled";
+
+        // stop tracking
+        work.isTrackingActive = false;
+        work.trackingStoppedBy = "technician";
+        work.trackingStoppedAt = new Date();
+
+        break;
+      default:
+        work.status = "inprogress";
+    }
+
+
+    work.issues.push(issueData);
+
+    work.issueCount = (work.issueCount || 0) + 1;
+
+    await work.save();
+
+    res.status(201).json({
+      message: "Issue raised successfully",
+      work,
+    });
+
+  } catch (error) {
+    console.error("Raise Issue Error:", error);
+    res.status(500).json({ message: "Failed to raise issue" });
+  }
+};
+
+
+
+exports.needPartRequest = async (req, res) => {
+  try {
+    const { workId, parts } = req.body;
+    const technicianId = req.user?._id || req.body.technicianId;
+
+    if (!parts || !Array.isArray(parts) || !parts.length) {
+      return res.status(400).json({ message: "Parts details are required" });
+    }
+
+    const work = await Work.findById(workId);
+    if (!work) return res.status(404).json({ message: "Work not found" });
+
+
+    let latestIssue = work.issues.find(i => i.issueType === "need_parts" && i.status === "open");
+    if (!latestIssue) {
+      latestIssue = work.issues.create({
+        issueType: "need_parts",
+        remarks: "",
+        raisedBy: technicianId,
+        raisedAt: new Date(),
+        status: "open",
+        parts: []
+      });
+      work.issues.push(latestIssue);
+    }
+
+    // Add new parts
+   parts.forEach(p => {
+  latestIssue.parts.push({
+    itemName: p.itemName,
+    quantity: p.quantity,
+    Decofitem: typeof p.Decofitem === "string" && p.Decofitem.trim() !== "" 
+                ? p.Decofitem 
+                : "not having", // ✅ default fallback
+    unit: p.unit || "",
+    company: p.companyName || "",
+    requiredDate: p.requiredDate ? new Date(p.requiredDate) : null,
+    deliveryAddress: work.location || "",
+    requestedBy: technicianId,
+    requestedOn: new Date(),
+    status: "pending_fastresponse" 
+  });
+});
+
+    work.status = "inprogress";
+    await work.save();
+
+    return res.status(201).json({
+      success: true,
+      message: "Parts requested successfully",
+      parts: latestIssue.parts,
+      work
+    });
+  } catch (err) {
+    console.error("Add Part Request Error:", err);
+    return res.status(500).json({
+      message: "Failed to add part request",
+      error: err.message,
+      stack: err.stack
+    });
+  }
+};
+
+
+exports.generatePaymentReceiptPDF = async (req, res) => {
+  try{
+    const {workId}=req.params;
+    const userId=req.user._id;
+    const work=await Work.findById(workId).populate("client assignedTechnician");
+    if(!work){
+      return res.status(404).json({message:"work not found"});
+    }
+    if(String(work.client._id)!==String(userId)){
+      return res.status(403).json({message:"unauthorized access to receipt PDF"});
+    }
+    if(work.payment?.status!=="paymemnt_done"){
+      return res.status(400).json({message:"payment not completed yet"});
+    }
+  const receiptFilePath=path.join(
+    invoicesFolder,
+    `Invoice_${work.token}.pdf`
+  )
+   if(!fs.existsSync(receiptFilePath)){
+    return res.status(404).json({message:"receipt PDF not found"});
+   }
+   res.download(
+    receiptFilePath,
+        `Invoice_${work.token}.pdf`
+   )
+}catch(err){
+    console.error("Generate Payment Receipt PDF Error:", err);
+}
+
+}
+
+exports.getOrderSummary = async (req, res) => {
+  try {
+    const { workId } = req.params;
+    const userId = req.user?._id;
+
+    const work = await Work.findById(workId)
+      .populate("client")
+      .populate("assignedTechnician", "name profileImage rating");
+
+    if (!work) {
+      return res.status(404).json({
+        success: false,
+        message: "Work not found"
+      });
+    }
+
+    if (!work.client || String(work.client._id) !== String(userId)) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized access"
+      });
+    }
+
+    const bill = await Bill.findOne({ workId })
+      .populate("technicianId", "name profileImage rating")
+      .populate("clientId", "name");
+
+    if (!bill) {
+      return res.status(404).json({
+        success: false,
+        message: "Bill not found"
+      });
+    }
+
+    const paymentRows = [];
+
+    // Service charge
+    if (Number(bill.serviceCharge || 0) > 0) {
+      paymentRows.push({
+        label: "Service Charges",
+        amount: Number(bill.serviceCharge || 0),
+        type: "service_charge"
+      });
+    }
+
+    // Dynamic items
+    if (Array.isArray(bill.items) && bill.items.length > 0) {
+      bill.items.forEach((item) => {
+        paymentRows.push({
+          label: item.name,
+          qty: Number(item.qty || 0),
+          price: Number(item.price || 0),
+          amount: Number(item.qty || 0) * Number(item.price || 0),
+          type: "item"
+        });
+      });
+    }
+
+    // Taxes
+    paymentRows.push({
+      label: "Taxes",
+      amount: Number(bill.taxes || 0),
+      type: "tax"
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Order summary fetched successfully",
+      data: {
+        workId: work._id,
+        billId: bill._id,
+        status: bill.status,
+        paymentMethod: bill.paymentMethod,
+
+        technician: {
+          id: bill.technicianId?._id || work.assignedTechnician?._id || null,
+          name:
+            bill.technicianId?.name ||
+            work.assignedTechnician?.name ||
+            "Technician",
+          service:
+            work.serviceName ||
+            work.category ||
+            work.workType ||
+            "Service",
+          rating:
+            bill.technicianId?.rating ||
+            work.assignedTechnician?.rating ||
+            5,
+          image:
+            bill.technicianId?.profileImage ||
+            work.assignedTechnician?.profileImage ||
+            ""
+        },
+
+        serviceDetails: {
+          arrivedAt: work.arrivedAt || "12:15pm",
+          date: work.scheduleDate || work.createdAt || null,
+          time: work.scheduleTime || "",
+          address:
+            work.address?.fullAddress ||
+            work.address ||
+            work.location ||
+            ""
+        },
+
+        paymentDetails: {
+          rows: paymentRows,
+          totalPaidAmount: Number(bill.totalAmount || 0),
+          taxes: Number(bill.taxes || 0),
+          serviceCharge: Number(bill.serviceCharge || 0),
+          items: Array.isArray(bill.items) ? bill.items : []
+        },
+
+        extra: {
+          invoiceId: bill.invoiceId || "",
+          pdfUrl: bill.pdfUrl || "",
+          paidAt: bill.paidAt || null,
+          notes: bill.notes || ""
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Get Order Summary Error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch order summary"
+    });
+  }
+};
