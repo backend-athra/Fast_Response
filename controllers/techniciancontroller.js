@@ -888,6 +888,7 @@ exports.generatePaymentReceiptPDF = async (req, res) => {
 
 const Service = require("../model/servicecard");
 
+
 exports.getOrderSummary = async (req, res) => {
   try {
     const { workId } = req.params;
@@ -908,6 +909,7 @@ exports.getOrderSummary = async (req, res) => {
       });
     }
 
+    // 🔐 Ensure only client can access own order
     if (!work.client || String(work.client._id) !== String(userId)) {
       return res.status(403).json({
         success: false,
@@ -918,24 +920,66 @@ exports.getOrderSummary = async (req, res) => {
     const bill = await Bill.findOne({ workId })
       .populate(
         "technicianId",
-        "name fullname profileImage profilePic photo image avatar rating mobile phone"
+        "name fullname profileImage profilePic photo image avatar rating phone mobile"
       )
       .populate("clientId", "name")
       .lean();
 
-    // 🔍 Optional service fetch for better title/image/rating
+    // =========================
+    // 🔍 Fetch service card data
+    // =========================
     let serviceData = null;
-    if (work.serviceType) {
+
+    const serviceTypeRaw =
+      work?.serviceType ||
+      work?.serviceName ||
+      work?.category ||
+      work?.workType ||
+      "";
+
+    const specializationArray = Array.isArray(work?.specialization)
+      ? work.specialization
+      : work?.specialization
+      ? [work.specialization]
+      : [];
+
+    if (serviceTypeRaw || specializationArray.length > 0) {
+      const orConditions = [];
+
+      if (serviceTypeRaw) {
+        orConditions.push(
+          {
+            title: {
+              $regex: new RegExp(`^${escapeRegex(serviceTypeRaw)}$`, "i")
+            }
+          },
+          {
+            serviceType: {
+              $regex: new RegExp(`^${escapeRegex(serviceTypeRaw)}$`, "i")
+            }
+          },
+          {
+            name: {
+              $regex: new RegExp(`^${escapeRegex(serviceTypeRaw)}$`, "i")
+            }
+          }
+        );
+      }
+
+      if (specializationArray.length > 0) {
+        orConditions.push({
+          specialization: { $in: specializationArray }
+        });
+      }
+
       serviceData = await Service.findOne({
-        $or: [
-          { title: work.serviceType },
-          { serviceType: work.serviceType },
-          { specialization: { $in: work.specialization || [] } }
-        ]
+        $or: orConditions
       }).lean();
     }
 
+    // =========================
     // 👨‍🔧 Technician fallback
+    // =========================
     const technicianSource = bill?.technicianId || work?.assignedTechnician || {};
 
     const technicianName =
@@ -952,27 +996,47 @@ exports.getOrderSummary = async (req, res) => {
       "";
 
     const technicianRating =
-      technicianSource?.rating ||
-      serviceData?.rating ||
+      Number(technicianSource?.rating) ||
+      Number(serviceData?.rating) ||
       5;
 
-    // 🛠 Service title fallback
+    // =========================
+    // 🛠 Service title & image
+    // =========================
     const serviceTitle =
       serviceData?.title ||
-      work.serviceName ||
-      work.serviceType ||
-      work.category ||
-      work.workType ||
+      serviceData?.serviceType ||
+      serviceData?.name ||
+      work?.serviceName ||
+      work?.serviceType ||
+      work?.category ||
+      work?.workType ||
       "Service";
 
+    const serviceImage =
+      serviceData?.image ||
+      serviceData?.serviceImage ||
+      serviceData?.img ||
+      serviceData?.banner ||
+      serviceData?.icon ||
+      serviceData?.thumbnail ||
+      serviceData?.photo ||
+      "";
+
+    const serviceRating =
+      Number(serviceData?.rating) ||
+      Number(technicianSource?.rating) ||
+      5;
+
+    // =========================
     // 💰 Payment rows
+    // =========================
     const paymentRows = [];
 
     const serviceCharge = Number(
       bill?.serviceCharge ??
       work?.invoice?.serviceCharge ??
       work?.serviceCharge ??
-   
       0
     );
 
@@ -984,30 +1048,36 @@ exports.getOrderSummary = async (req, res) => {
       });
     }
 
-    // Dynamic items from Bill
+    // Bill items
     if (Array.isArray(bill?.items) && bill.items.length > 0) {
       bill.items.forEach((item) => {
+        const qty = Number(item?.qty || 0);
+        const price = Number(item?.price || 0);
+
         paymentRows.push({
-          label: item.name || "Item",
-          qty: Number(item.qty || 0),
-          price: Number(item.price || 0),
-          amount: Number(item.qty || 0) * Number(item.price || 0),
+          label: item?.name || "Item",
+          qty,
+          price,
+          amount: qty * price,
           type: "item"
         });
       });
     }
 
-    // Fallback items from Work.invoice.usedMaterials if bill.items empty
+    // Fallback materials from work.invoice.usedMaterials
     else if (
       Array.isArray(work?.invoice?.usedMaterials) &&
       work.invoice.usedMaterials.length > 0
     ) {
       work.invoice.usedMaterials.forEach((item) => {
+        const qty = Number(item?.quantity || 0);
+        const price = Number(item?.price || 0);
+
         paymentRows.push({
-          label: item.name || "Item",
-          qty: Number(item.quantity || 0),
-          price: Number(item.price || 0),
-          amount: Number(item.quantity || 0) * Number(item.price || 0),
+          label: item?.name || "Item",
+          qty,
+          price,
+          amount: qty * price,
           type: "item"
         });
       });
@@ -1019,26 +1089,72 @@ exports.getOrderSummary = async (req, res) => {
       0
     );
 
-    paymentRows.push({
-      label: "Taxes",
-      amount: taxes,
-      type: "tax"
-    });
+    if (taxes > 0) {
+      paymentRows.push({
+        label: "Taxes",
+        amount: taxes,
+        type: "tax"
+      });
+    }
 
     const totalPaidAmount = Number(
       bill?.totalAmount ??
       work?.invoice?.total ??
+      serviceCharge + taxes ??
       0
     );
 
+    // =========================
+    // 💳 Payment Intent NEW
+    // =========================
+    const paymentMethod =
+      bill?.paymentMethod ||
+      work?.payment?.method ||
+      work?.invoice?.payment ||
+      "upi";
+
+    const paymentStatus =
+      bill?.status ||
+      work?.payment?.status ||
+      work?.status ||
+      "pending";
+
+    const upiUri =
+      bill?.upiUri ||
+      work?.payment?.upiUri ||
+      "";
+
+    const paymentLink =
+      bill?.clickableUPI ||
+      work?.payment?.clickableUPI ||
+      "";
+
+    const paymentIntent = {
+      type: paymentMethod,
+      amount: totalPaidAmount || serviceCharge || 0,
+      currency: "INR",
+      upiUri,
+      paymentLink,
+      deepLink: upiUri,
+      status: paymentStatus,
+      billId: bill?._id || null,
+      workId: work?._id || null
+    };
+
+    // =========================
     // 📍 Address fallback
+    // =========================
     const address =
       work?.address?.fullAddress ||
-      work?.address ||
+      work?.address?.addressLine ||
+      work?.address?.street ||
+      (typeof work?.address === "string" ? work.address : "") ||
       work?.location ||
       "";
 
-    // 📅 Date/time fallback
+    // =========================
+    // 📅 Date / Time fallback
+    // =========================
     const serviceDate =
       work?.scheduleDate ||
       work?.date ||
@@ -1050,29 +1166,40 @@ exports.getOrderSummary = async (req, res) => {
       work?.timeSlot ||
       "";
 
+    // =========================
+    // ✅ Final Response
+    // =========================
     return res.status(200).json({
       success: true,
       message: "Order summary fetched successfully",
       data: {
         workId: work._id,
         billId: bill?._id || null,
-        status:
-          bill?.status ||
-          work?.payment?.status ||
-          work?.status ||
-          "pending",
-        paymentMethod:
-          bill?.paymentMethod ||
-          work?.payment?.method ||
-          work?.invoice?.payment ||
-          "",
+
+        status: paymentStatus,
+
+        paymentMethod,
+
+        client: {
+          id: work?.client?._id || null,
+          name: work?.client?.name || "",
+          mobile: work?.client?.mobile || ""
+        },
 
         technician: {
           id: technicianSource?._id || null,
           name: technicianName,
-          service: serviceTitle,
           rating: technicianRating,
-          image: technicianImage
+          image: technicianImage,
+          mobile: technicianSource?.mobile || technicianSource?.phone || ""
+        },
+
+        service: {
+          title: serviceTitle,
+          image: serviceImage,
+          rating: serviceRating,
+          serviceType: work?.serviceType || "",
+          specialization: specializationArray
         },
 
         serviceDetails: {
@@ -1094,19 +1221,24 @@ exports.getOrderSummary = async (req, res) => {
             : []
         },
 
+        paymentIntent, // ✅ NEW FIELD ADDED
+
         extra: {
           invoiceId:
             bill?.invoiceId ||
             work?.invoice?.invoiceNumber ||
             "",
+
           pdfUrl:
             bill?.pdfUrl ||
             work?.invoice?.pdfUrl ||
             "",
+
           paidAt:
             bill?.paidAt ||
             work?.payment?.paidAt ||
             null,
+
           notes:
             bill?.notes ||
             work?.remarks ||
@@ -1118,7 +1250,15 @@ exports.getOrderSummary = async (req, res) => {
     console.error("Get Order Summary Error:", err);
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch order summary"
+      message: "Failed to fetch order summary",
+      error: err.message
     });
   }
 };
+
+// =========================
+// 🔒 Regex Escape Helper
+// =========================
+function escapeRegex(text = "") {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
