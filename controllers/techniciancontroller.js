@@ -186,7 +186,7 @@ exports.completeWorkAndGenerateBill = async (req, res) => {
       await sendPush(
         clientUser.fcmTokens,
         "Payment Pending",
-        `Aapka ${work.serviceType} work complete please check the bill and pay `,
+        `Aapka ${work.serviceType} work complete ho gaya hai. Bill dekhne aur payment karne ke liye tap karein.`,
         {
           role: "CLIENT",
           type: "work_completed",
@@ -198,7 +198,7 @@ exports.completeWorkAndGenerateBill = async (req, res) => {
           paymentMethod: String(paymentMethod || "upi"),
           upiUri: String(upiUri || ""),
           clickableUPI: String(clickableUPI || ""),
-          status: "completed",
+          status: "work_completed",
           screen: "BillDetails"
         },
         clientUser._id
@@ -571,44 +571,47 @@ exports.getAllTechnicianWorks = async (req, res) => {
 
 exports.confirmPayment = async (req, res) => {
   try {
-    const { workId, paymentMethod } = req.body; 
+    const { workId, paymentMethod } = req.body;
     const technicianId = req.user._id;
-    const userId=await Work.findById(workId).select("client token serviceType");
+
+    const userId = await Work.findById(workId).select("client token serviceType");
+
     const work = await Work.findById(workId)
       .populate("client", "firstName email phone")
       .populate("assignedTechnician", "firstName token email role phone");
 
-    if (!work) return res.status(404).json({ message: "Work not found" });
-
+    if (!work) {
+      return res.status(404).json({ message: "Work not found" });
+    }
 
     if (String(work.assignedTechnician?._id) !== String(technicianId)) {
       return res.status(403).json({ message: "Unauthorized: not your assigned work" });
     }
 
-   
-    // if (work.status!=="completed") {
-    //   return res.status(400).json({ message: "Work must be completed before confirming payment" });
-    // }
-
-    
     if (!["cash", "upi"].includes(paymentMethod)) {
       return res.status(400).json({ message: "Invalid payment method" });
     }
 
-   
+    // ================================
+    // UPDATE PAYMENT
+    // ================================
     work.payment = {
       method: paymentMethod,
       status: "payment_done",
       confirmedBy: technicianId,
       confirmedAt: new Date(),
-      paidAt: work.payment?.paidAt || new Date(), 
+      paidAt: work.payment?.paidAt || new Date(),
     };
 
-   
-    work.status = "payment_done";
+    work.status = "confirm";
     await work.save();
+
     emitWorkStatus(work);
- const receiptFilePath = path.join(
+
+    // ================================
+    // GENERATE RECEIPT PDF
+    // ================================
+    const receiptFilePath = path.join(
       invoicesFolder,
       `payment_receipt_${work.token}.pdf`
     );
@@ -623,95 +626,105 @@ exports.confirmPayment = async (req, res) => {
     );
 
     const pdfBuffer = fs.readFileSync(receiptFilePath);
-    const emailBody = `
-      <p>Hello ${work.client.firstName || ""},</p>
-      <p>Your payment for Work ID <b>${work.token}</b> has been successfully confirmed.</p>
-      <p><b>Payment Method:</b> ${paymentMethod.toUpperCase()}</p>
-      <p><b>Technician:</b> ${work.assignedTechnician.firstName}</p>
-      <p>Your payment receipt is attached as a PDF.</p>
-    `;
 
-    await sendEmail(
-      work.client.email,
-      "Payment Receipt - Thank You",
-      emailBody,
-      [
-        {
-          content: pdfBuffer.toString("base64"),
-          filename: `payment_receipt_${work.token}.pdf`,
-          type: "application/pdf",
-          disposition: "attachment",
-        },
-      ]
+    // ================================
+    // DATABASE NOTIFICATION
+    // ================================
+    await sendNotification(
+      userId.client,
+      "client",
+      "Payment Confirmed",
+      `Aapka ${userId.serviceType} service payment successfully confirm ho gaya hai.`,
+      "payment_received",
+      `work-${userId.token}`
     );
 
-   await sendNotification(
-  userId.client,
-  "client",
-  "Payment Successful",
-  `Your technician ${technicianId.firstName} complete your work.the service type is ${userId.serviceType}.Payment type:${paymentMethod}`,
-  "payment_received",
-  `work-${userId.token}`
-)
-// const clientUser = await User.findById(userId.client).select("fcmToken");
-// if (clientUser?.fcmToken) {
-//   await admin.messaging().send({
-//     token: clientUser.fcmToken,
-//     notification: {
-//       title: "payment_Done",
-//       body: `Your Payment done. Thanks for choosing us`,
- 
-//     },
-//     data: {
-//       type: "payment_Done",
-//       link: `work-${userId.token}`,
-//     },
-//   });
-// }
-    const clientUser = await User.findById(userId.client).select("fcmToken");
+    // ================================
+    // PUSH NOTIFICATION  ✅ WITH DETAILS
+    // ================================
+    const clientUser = await User.findById(userId.client)
+      .select("fcmTokens fcmToken firstName");
 
-    /**
-     * 🔥 CUSTOM FCM PUSH (WORK_APPROVED)
-     */
-    if (clientUser?.fcmToken) {
+    console.log("📲 CLIENT TOKENS:", clientUser?.fcmTokens || clientUser?.fcmToken || []);
+    console.log("🧾 WORK ID:", work._id.toString());
+    console.log("💳 PAYMENT METHOD:", paymentMethod);
+    console.log("🛠️ SERVICE:", userId.serviceType);
 
+    // ================================
+    // IF USING fcmTokens ARRAY
+    // ================================
+    if (clientUser?.fcmTokens?.length) {
+      await sendPush(
+        clientUser.fcmTokens,
+        "Payment Confirmed",
+        `Aapka ${userId.serviceType} service payment successfully confirm ho gaya hai.`,
+        {
+          role: "CLIENT",
+          type: "payment_received",
+          service: String(userId.serviceType || "Service"),
+          technicianName: String(work.assignedTechnician?.firstName || "Technician"),
+          phone: String(work.assignedTechnician?.phone || ""),
+          workId: String(work._id),
+          paymentMethod: String(paymentMethod || ""),
+          paymentStatus: "payment_done",
+          status: "confirm",
+          screen: "WorkDetails"
+        },
+        clientUser._id
+      );
+
+      console.log("✅ PAYMENT CONFIRMED PUSH SENT (fcmTokens)");
+    }
+
+    // ================================
+    // IF USING SINGLE fcmToken
+    // ================================
+    else if (clientUser?.fcmToken) {
       await admin.messaging().send({
         token: clientUser.fcmToken,
+
+        notification: {
+          title: "Payment Confirmed",
+          body: `Aapka ${userId.serviceType} service payment successfully confirm ho gaya hai.`,
+        },
 
         android: {
           priority: "high",
         },
 
         data: {
-          // 👇 FRONTEND MATCHING KEYS
-          title: "Payment confirm ",
-          body: "Technician has confirmed your service payment",
+          title: "Payment Confirmed",
+          body: `Aapka ${userId.serviceType} service payment successfully confirm ho gaya hai.`,
 
           role: "CLIENT",
           type: "payment_received",
-
-          service: userId.serviceType || "Service",
-          technicianName: work.assignedTechnician.firstName || "Technician",
-          // eta: "30 mins",
-
-          phone: work.assignedTechnician.phone || "",
-
-          workId: work._id.toString()
+          service: String(userId.serviceType || "Service"),
+          technicianName: String(work.assignedTechnician?.firstName || "Technician"),
+          phone: String(work.assignedTechnician?.phone || ""),
+          workId: String(work._id),
+          paymentMethod: String(paymentMethod || ""),
+          paymentStatus: "payment_done",
+          status: "confirm",
+          screen: "WorkDetails"
         },
       });
 
-      console.log("✅ WORK_APPROVED PUSH SENT");
-
+      console.log("✅ PAYMENT CONFIRMED PUSH SENT (single fcmToken)");
+    } else {
+      console.log("⚠️ No FCM token found for client");
     }
 
-
+    // ================================
+    // RESPONSE
+    // ================================
     res.status(200).json({
       success: true,
       message: "Payment confirmed successfully by technician.",
       payment: work.payment,
     });
+
   } catch (err) {
-    console.error(" Confirm Payment Error:", err);
+    console.error("Confirm Payment Error:", err);
     res.status(500).json({ message: "Server error while confirming payment." });
   }
 };
@@ -887,7 +900,6 @@ exports.generatePaymentReceiptPDF = async (req, res) => {
 
 
 const Service = require("../model/servicecard");
-
 
 exports.getOrderSummary = async (req, res) => {
   try {
