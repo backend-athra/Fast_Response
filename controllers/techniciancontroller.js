@@ -177,10 +177,10 @@ exports.completeWorkAndGenerateBill = async (req, res) => {
     const clientUser = await User.findById(work.client._id)
       .select("fcmTokens firstName");
 
-    console.log("📲 CLIENT TOKENS:", clientUser?.fcmTokens || []);
-    console.log("🧾 BILL ID:", bill._id.toString());
-    console.log("🛠️ WORK ID:", work._id.toString());
-    console.log("💰 AMOUNT:", totalAmount);
+    // console.log("📲 CLIENT TOKENS:", clientUser?.fcmTokens || []);
+    // console.log("🧾 BILL ID:", bill._id.toString());
+    // console.log("🛠️ WORK ID:", work._id.toString());
+    // console.log("💰 AMOUNT:", totalAmount);
 
     if (clientUser?.fcmTokens?.length) {
       await sendPush(
@@ -574,6 +574,8 @@ exports.confirmPayment = async (req, res) => {
     const { workId, paymentMethod } = req.body;
     const technicianId = req.user._id;
 
+console.log(req.body,"confirm")
+
     const userId = await Work.findById(workId).select("client token serviceType");
 
     const work = await Work.findById(workId)
@@ -645,10 +647,10 @@ exports.confirmPayment = async (req, res) => {
     const clientUser = await User.findById(userId.client)
       .select("fcmTokens fcmToken firstName");
 
-    console.log("📲 CLIENT TOKENS:", clientUser?.fcmTokens || clientUser?.fcmToken || []);
-    console.log("🧾 WORK ID:", work._id.toString());
-    console.log("💳 PAYMENT METHOD:", paymentMethod);
-    console.log("🛠️ SERVICE:", userId.serviceType);
+    // console.log("📲 CLIENT TOKENS:", clientUser?.fcmTokens || clientUser?.fcmToken || []);
+    // console.log("🧾 WORK ID:", work._id.toString());
+    // console.log("💳 PAYMENT METHOD:", paymentMethod);
+    // console.log("🛠️ SERVICE:", userId.serviceType);
 
     // ================================
     // IF USING fcmTokens ARRAY
@@ -735,7 +737,7 @@ exports.confirmPayment = async (req, res) => {
 exports.raiseWorkIssue = async (req, res) => {
   try {
     const { workId, issueType, remarks, specializationRequired, reason } = req.body;
-    console.log(req.body)
+    // console.log(req.body)
     const technicianId =
       req.user && req.user._id ? req.user._id : req.body.technicianId;
 

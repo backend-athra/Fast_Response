@@ -857,7 +857,7 @@ exports.WorkStart = async (req, res) => {
 
 exports.updateLocation = async (req, res) => {
   try {
-    const { lat, lng } = req.body;
+    const { lat, lng, technicianStarted } = req.body;
     const technicianId = req.user._id;
 
     if (!lat || !lng) {
@@ -866,11 +866,14 @@ exports.updateLocation = async (req, res) => {
         .json({ message: "Latitude and longitude required" });
     }
 
-   
+    console.log("=====", req.body);
+
     const work = await Work.findOne({
       assignedTechnician: technicianId,
       status: { $in: ["approved", "dispatch", "on_the_way", "inprogress"] },
-    }).populate("client", "coordinates name phone email");
+    })
+      .populate("client", "coordinates name phone email fcmToken fcmTokens")
+      .populate("assignedTechnician", "firstName phone");
 
     if (!work) {
       return res.status(403).json({
@@ -878,66 +881,91 @@ exports.updateLocation = async (req, res) => {
       });
     }
 
-   
+    // =========================
+    // UPDATE TECHNICIAN LOCATION
+    // =========================
     await User.findByIdAndUpdate(technicianId, {
       coordinates: { lat, lng },
       lastLocationUpdate: new Date(),
       onDuty: true,
     });
 
-    if (work.status === "approved") {
+    // =========================
+    // STATUS CHANGE (ONLY IF TECHNICIAN STARTED)
+    // =========================
+    if (technicianStarted === true && work.status === "approved") {
       work.status = "dispatch";
-      await work.save();
-
-     
-      const clientUser = work.client;
-
-      if (clientUser?.fcmTokens?.length) {
-        await sendPush(
-          clientUser.fcmTokens,
-          "Technician On The Way",
-          "Your technician has started moving towards your location.",
-          {
-            role: "CLIENT",
-            type: "technician_started",
-            workId: String(work._id),
-          },
-          clientUser._id
-        );
-      }
-
-      await sendNotification(
-        clientUser._id,
-        "client",
-        "Technician On The Way",
-        "Your technician has started moving towards your location.",
-        "technician_started",
-        `work-${work._id}`
-      );
+      console.log("🟡 STATUS CHANGED TO DISPATCH");
     }
 
-    
+    // =========================
+    // NOTIFICATION SEND ONLY ONCE
+    // =========================
+    if (
+      technicianStarted === true &&
+      !work.dispatchNotificationSent &&
+      (work.client?.fcmToken || (work.client?.fcmTokens && work.client.fcmTokens.length > 0))
+    ) {
+      const tokens = [];
 
-    const clientLat =
-      work.coordinates?.lat || work.client.coordinates?.lat;
-    const clientLng =
-      work.coordinates?.lng || work.client.coordinates?.lng;
+      if (work.client?.fcmToken) {
+        tokens.push(work.client.fcmToken);
+      }
+
+      if (work.client?.fcmTokens?.length) {
+        tokens.push(...work.client.fcmTokens);
+      }
+
+      const uniqueTokens = [...new Set(tokens)].filter(Boolean);
+
+      for (const token of uniqueTokens) {
+        try {
+          await admin.messaging().send({
+            token,
+            android: {
+              priority: "high",
+            },
+            data: {
+              title: String("Technician On The Way"),
+              body: String("Your technician has started travelling to your location"),
+              role: "CLIENT",
+              type: "technician_on_the_way",
+              service: String(work.serviceType || "Service"),
+              technicianName: String(work.assignedTechnician?.firstName || ""),
+              phone: String(work.assignedTechnician?.phone || ""),
+              workId: String(work._id),
+            },
+          });
+        } catch (pushErr) {
+          console.error("❌ Push send failed:", pushErr.message);
+        }
+      }
+
+      work.dispatchNotificationSent = true;
+      console.log("✅ DISPATCH PUSH SENT ONLY ONCE");
+    }
+
+    // =========================
+    // CLIENT LOCATION CALC
+    // =========================
+    const clientLat = work.coordinates?.lat || work.client?.coordinates?.lat;
+    const clientLng = work.coordinates?.lng || work.client?.coordinates?.lng;
 
     let eta = null;
     let distance = null;
     let polyline = null;
 
-if(global.io){
+    // SOCKET TRACKING
+    if (global.io) {
       global.io.emit(`track-${technicianId}`, {
         workId: work._id,
         lat,
         lng,
         time: Date.now(),
       });
-}
+    }
 
-
-    
+    // GOOGLE MAPS ETA
     if (clientLat && clientLng) {
       const origin = `${lat},${lng}`;
       const destination = `${clientLat},${clientLng}`;
@@ -949,45 +977,42 @@ if(global.io){
 
       if (data.status === "OK" && data.routes.length) {
         const leg = data.routes[0].legs[0];
-        eta = Math.round(leg.duration.value / 60); 
+        eta = Math.round(leg.duration.value / 60);
         distance = leg.distance.text;
         polyline = data.routes[0].overview_polyline.points;
       }
     }
 
-    // 
-
+    // SOCKET ETA UPDATE
     if (global.io) {
-     
-   
-
-      
       global.io.emit(`technician_eta_update-${technicianId}`, {
-          workId: work._id,
-          technicianId,
-          location: { lat, lng },
-          status: work.status,
-          eta,         
-          distance,     
-          polyline,     
-          updatedAt: Date.now(),
-        });
+        workId: work._id,
+        technicianId,
+        location: { lat, lng },
+        status: work.status,
+        eta,
+        distance,
+        polyline,
+        updatedAt: Date.now(),
+      });
     }
 
-
+    // SAVE WORK AFTER STATUS / NOTIFICATION CHANGE
+    await work.save();
 
     return res.status(200).json({
       message: "Technician location updated successfully",
       workStatus: work.status,
-      eta,         
-      distance,     
+      eta,
+      distance,
+      notificationSent: work.dispatchNotificationSent,
     });
+
   } catch (err) {
     console.error("Update Location Error:", err);
     res.status(500).json({ message: "Server error" });
   }
 };
-
 exports.stopTracking = async (req, res) => {
   try {
 
@@ -1083,6 +1108,93 @@ exports.stopTracking = async (req, res) => {
       message: "Server error"
     });
 
+  }
+};
+
+exports.startTracking = async (req, res) => {
+  try {
+    const technicianId = req.user._id;
+    const { workId } = req.params; // or req.body
+
+    // find work by ID
+    const work = await Work.findOne({
+      _id: workId,
+      assignedTechnician: technicianId,
+      status: "approved"
+    }).populate("client", "coordinates");
+
+    if (!work) {
+      return res.status(404).json({
+        success: false,
+        message: "Work not found or not assigned to you"
+      });
+    }
+
+    // check if already active
+    if (work.isTrackingActive) {
+      return res.status(400).json({
+        success: false,
+        message: "Tracking already started"
+      });
+    }
+
+    // technician location
+    const technician = await User.findById(technicianId);
+
+    const techLat = technician.coordinates?.lat;
+    const techLng = technician.coordinates?.lng;
+
+    const clientLat =
+      work.coordinates?.lat || work.client?.coordinates?.lat;
+    const clientLng =
+      work.coordinates?.lng || work.client?.coordinates?.lng;
+
+    let distanceMeters = 0;
+    let distanceStatus = "normal";
+
+    // OPTIONAL: calculate distance (if needed)
+    if (techLat && techLng && clientLat && clientLng) {
+      const R = 6371000; // Earth radius in meters
+      const toRad = (value) => (value * Math.PI) / 180;
+
+      const dLat = toRad(clientLat - techLat);
+      const dLng = toRad(clientLng - techLng);
+
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(techLat)) *
+          Math.cos(toRad(clientLat)) *
+          Math.sin(dLng / 2) *
+          Math.sin(dLng / 2);
+
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      distanceMeters = R * c;
+
+      if (distanceMeters > 500) {
+        distanceStatus = "far";
+      }
+    }
+
+    // START TRACKING
+    work.isTrackingActive = true;
+
+    await work.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Tracking started successfully",
+      workId: work._id,
+      distanceMeters,
+      distanceStatus
+    });
+
+  } catch (err) {
+    console.error("Start Tracking Error:", err);
+
+    res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
   }
 };
 
