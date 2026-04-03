@@ -12,7 +12,7 @@ const {
   WorkComplete,
   trackTechnician,
   verifyWorkOTP,
-  updateLocation,getClientWorkStatus,reportWorkIssue,generatePaymentRecei,getLocation,saveLocation,getRoutes,selectRoute,subscribe,getSubscribers,getWorkStatus,cancelOrder,rescheduleOrder,reachLocation
+  updateLocation,getClientWorkStatus,reportWorkIssue,generatePaymentRecei,getLocation,saveLocation,getRoutes,selectRoute,subscribe,getSubscribers,getWorkStatus,cancelOrder,rescheduleOrder,reachLocation,startTracking
 } = require('../controllers/workController');
 const { 
  completeWorkAndGenerateBill ,getTechnicianSummary
@@ -112,4 +112,5 @@ router.patch(
 router.post("/cancel-order/:workId",protect,authorize('client'),cancelOrder);
 router.post("/re-order/:workId",protect,authorize('client'),rescheduleOrder);
 router.post("/verify-otp/:workId",protect,authorize('technician'), verifyWorkOTP);
+router.post('/start/:workId',protect,authorize('technician'),startTracking)
 module.exports = router;
