@@ -66,6 +66,7 @@ const workSchema = new mongoose.Schema(
         "onhold_parts",
         "escalated",
         "rescheduled",
+        
       ],
       default: "open",
     },
@@ -83,7 +84,16 @@ otpCreatedAt: {
 },
 isTrackingActive: {
   type: Boolean,
-  default: true
+
+},
+technicianStartedNotified: {
+  type: Boolean,
+  default: false,
+},
+
+technicianNearbyNotified: {
+  type: Boolean,
+  default: false,
 },
 
 trackingStoppedBy: {
@@ -190,12 +200,12 @@ issueCount: {
   default: "inprogress", // client ko dikhane ke liye
 },
 
-    beforephoto: { type: String },
+    beforephoto: [{ type: String }],
 
 
 
 
-    afterphoto: { type: String },
+    afterphoto: [{ type: String }],
 
     
     invoice: {
