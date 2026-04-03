@@ -252,19 +252,19 @@ exports.getTechnicianSummary1 = async (req, res) => {
   
     const completedCount = await Work.countDocuments({
       assignedTechnician: technicianId,
-      status: "ompleted",
+      status: "confirm",
     });
 
  
-    const rejectedCount = await Work.countDocuments({
+    const cancelledCount = await Work.countDocuments({
       assignedTechnician: technicianId,
-      status: "rejected",
+      status: "cancelled",
     });
 
    
     const completedWorks = await Work.find({
       assignedTechnician: technicianId,
-      status: "completed",
+      status: "confirm",
     });
 
     const totalEarnings = completedWorks.reduce((sum, work) => {
@@ -280,7 +280,7 @@ exports.getTechnicianSummary1 = async (req, res) => {
         totalWorkCount,
         activeCount,
         completedCount,
-        rejectedCount,
+        cancelledCount,
         totalEarnings,
       },
     });
